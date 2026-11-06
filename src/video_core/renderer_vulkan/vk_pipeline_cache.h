@@ -134,6 +134,8 @@ private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
+    /// Waits briefly (within a per-frame budget) for an asynchronous build before a draw is skipped.
+    [[nodiscard]] bool WaitForAsyncBuild(GraphicsPipeline* pipeline) const;
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
 
@@ -178,6 +180,8 @@ private:
     /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
     void EvictUnusedPipelines();
     u64 frame_count{};
+    /// Time this frame spent waiting for asynchronous pipeline builds before skipping draws.
+    mutable std::chrono::steady_clock::duration async_wait_spent{};
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
 

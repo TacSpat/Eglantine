@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstddef>
 #include <fstream>
 #include <iostream>
@@ -1025,6 +1026,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
 
 void PipelineCache::TickFrame() {
     ++frame_count;
+    async_wait_spent = {};
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }
@@ -1076,6 +1078,31 @@ void PipelineCache::EvictUnusedPipelines() {
              EvictAfterFrames, graphics_cache.size());
 }
 
+bool PipelineCache::WaitForAsyncBuild(GraphicsPipeline* pipeline) const {
+    // A draw whose pipeline is still compiling on a worker is skipped, which makes new objects
+    // blink for a few frames (OoT's Kokiri Forest view skipped up to ~90 draws a second). Most
+    // driver compiles finish within a few milliseconds, so wait briefly first, within a per-frame
+    // budget so a burst of new pipelines can't freeze a frame for long.
+    // EDEN_ASYNC_SHADER_WAIT_MS (per draw, default 3) and EDEN_ASYNC_SHADER_FRAME_MS (per frame,
+    // default 10); 0 skips at once as before.
+    static const auto read_ms = [](const char* name, long fallback) {
+        const char* value = std::getenv(name);
+        return std::chrono::milliseconds{value != nullptr ? std::strtol(value, nullptr, 10) : fallback};
+    };
+    static const std::chrono::milliseconds per_draw = read_ms("EDEN_ASYNC_SHADER_WAIT_MS", 3);
+    static const std::chrono::milliseconds per_frame = read_ms("EDEN_ASYNC_SHADER_FRAME_MS", 10);
+    if (per_draw.count() <= 0 || async_wait_spent >= per_frame) {
+        return false;
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::microseconds>(per_frame - async_wait_spent);
+    const auto timeout = std::min<std::chrono::microseconds>(per_draw, remaining);
+    const auto begin = std::chrono::steady_clock::now();
+    const bool built = pipeline->WaitBuilt(timeout);
+    async_wait_spent += std::chrono::steady_clock::now() - begin;
+    return built;
+}
+
 GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
     if (pipeline->IsBuilt()) {
         return pipeline;
@@ -1086,6 +1113,9 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     // If something is using depth, we can assume that games are not rendering anything which
     // will be used one time.
     if (maxwell3d->regs.zeta_enable) {
+        if (WaitForAsyncBuild(pipeline)) {
+            return pipeline;
+        }
         graphics_miss = "async-build";
         return nullptr;
     }
@@ -1094,6 +1124,9 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
     // can't be built async
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     if (draw_state.draw_element_count <= 6) {
+        return pipeline;
+    }
+    if (WaitForAsyncBuild(pipeline)) {
         return pipeline;
     }
     graphics_miss = "async-build";
@@ -1389,6 +1422,9 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
         LOG_ERROR(Render_Vulkan, "Skipping {:#016x}", hash);
         return nullptr;
     }
+    if (PipelineCrashGuard::IsBlocked(PipelineCrashGuard::Kind::Compute, key.unique_hash)) {
+        return nullptr;
+    }
 
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
 
@@ -1431,9 +1467,6 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
             GPU::Logging::DumpSpirvShader(key.unique_hash,
                                           std::span<const u32>(code.data(), code.size()));
         }
-    }
-    if (PipelineCrashGuard::IsBlocked(PipelineCrashGuard::Kind::Compute, key.unique_hash)) {
-        return nullptr;
     }
 
     if (device.HasDebuggingToolAttached()) {

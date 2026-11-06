@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <type_traits>
@@ -141,6 +142,17 @@ public:
 
     [[nodiscard]] bool IsBuilt() const noexcept {
         return is_built.load(std::memory_order::relaxed);
+    }
+
+    /// Waits up to timeout for an asynchronous build to finish; returns whether it is built.
+    template <typename Rep, typename Period>
+    bool WaitBuilt(std::chrono::duration<Rep, Period> timeout) {
+        if (IsBuilt()) {
+            return true;
+        }
+        std::unique_lock lock{build_mutex};
+        return build_condvar.wait_for(lock, timeout,
+                                      [this] { return is_built.load(std::memory_order::relaxed); });
     }
 
     template <typename Spec>

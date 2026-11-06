@@ -1737,9 +1737,15 @@ private:
         // previous frame's fence instead and let the game prepare frame N+1 meanwhile (waiting
         // for this frame there cost 8-56 ms of every 34-105 ms frame, or never finished).
         // EDEN_NX2_FRAMES_AHEAD=1 always waits for the previous frame, =0 always for this one.
+        // nx2_switches.txt documents EDEN_NX2_FRAMES_AHEAD=2; any value above 0 used to read as
+        // 0 (always wait for this frame), the most serialized mode. Any positive value now runs
+        // ahead.
         static const int frames_ahead_setting = [] {
             const char* value = std::getenv("EDEN_NX2_FRAMES_AHEAD");
-            return value == nullptr ? -1 : value[0] == '1' ? 1 : 0;
+            if (value == nullptr) {
+                return -1;
+            }
+            return std::strtol(value, nullptr, 10) > 0 ? 1 : 0;
         }();
         // Donkey Kong Bananza's channels wait on each other every frame, so it always ran a frame
         // ahead, where it rewrote memory the GPU thread hadn't read yet (misread commands, then

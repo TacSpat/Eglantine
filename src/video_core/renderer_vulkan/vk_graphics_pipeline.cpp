@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <span>
@@ -685,10 +686,19 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
 
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
     if (!is_built.load(std::memory_order::relaxed)) {
-        // Wait for the pipeline to be built
+        // Wait for the pipeline to be built. This stalls command submission for the whole frame,
+        // so long waits are logged with the pipeline they waited for.
         scheduler.Record([this](vk::CommandBuffer) {
+            const auto begin = std::chrono::steady_clock::now();
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+            const auto waited = std::chrono::steady_clock::now() - begin;
+            if (waited > std::chrono::milliseconds{20}) {
+                LOG_WARNING(Render_Vulkan,
+                            "Command submission waited {} ms for graphics pipeline {:016x} to build",
+                            std::chrono::duration_cast<std::chrono::milliseconds>(waited).count(),
+                            key.Hash());
+            }
         });
     }
     const bool is_rescaling{texture_cache.IsRescaling()};

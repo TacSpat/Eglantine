@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -122,7 +123,13 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         try {
             const PipelineCrashGuard::Scope crash_guard{PipelineCrashGuard::Kind::Compute,
                                                         shader_hash};
+            const auto build_begin = std::chrono::steady_clock::now();
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            const auto build_time = std::chrono::steady_clock::now() - build_begin;
+            if (build_time > std::chrono::milliseconds{50}) {
+                LOG_INFO(Render_Vulkan, "Driver built compute pipeline {:016x} in {} ms", shader_hash,
+                         std::chrono::duration_cast<std::chrono::milliseconds>(build_time).count());
+            }
         } catch (const vk::Exception& exception) {
             LOG_CRITICAL(Render_Vulkan, "Adreno rejected compute shader {:016X}: {}", shader_hash,
                          exception.what());
@@ -286,10 +293,19 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                          views_it);
 
     if (!is_built.load(std::memory_order::relaxed)) {
-        // Wait for the pipeline to be built
+        // Wait for the pipeline to be built. This stalls command submission for the whole frame,
+        // so long waits are logged with the shader they waited for.
         scheduler.Record([this](vk::CommandBuffer) {
+            const auto begin = std::chrono::steady_clock::now();
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+            const auto waited = std::chrono::steady_clock::now() - begin;
+            if (waited > std::chrono::milliseconds{20}) {
+                LOG_WARNING(Render_Vulkan,
+                            "Command submission waited {} ms for compute pipeline {:016x} to build",
+                            std::chrono::duration_cast<std::chrono::milliseconds>(waited).count(),
+                            shader_hash);
+            }
         });
     }
 

@@ -75,16 +75,18 @@ inline void Init(State& s) {
             continue;
         }
         std::string id;
+        std::string info;
         {
             std::ifstream marker(entry.path());
             std::getline(marker, id);
+            std::getline(marker, info);
         }
         if (!id.empty()) {
             std::ofstream(blocked_path, std::ios::app) << id << '\n';
             LOG_WARNING(Render_Vulkan,
-                        "Pipeline {} crashed the host driver last time; it will be skipped "
+                        "Pipeline {} ({}) crashed the host driver last time; it will be skipped "
                         "(delete {} to retry)",
-                        id, blocked_path.string());
+                        id, info.empty() ? "no stage info" : info, blocked_path.string());
         }
         std::error_code remove_ec;
         std::filesystem::remove(entry.path(), remove_ec);
@@ -131,7 +133,8 @@ inline bool IsBlocked(Kind kind, u64 hash) {
 /// Marks the calling thread as inside the driver building this pipeline for its lifetime.
 class Scope {
 public:
-    Scope(Kind kind, u64 hash) {
+    /// info (optional) is written after the id, e.g. the pipeline's stages, for diagnosis.
+    Scope(Kind kind, u64 hash, const std::string& info = {}) {
         auto& state = detail::Get();
         if (!state.enabled) {
             return;
@@ -139,6 +142,9 @@ public:
         path = detail::MarkerPath(state);
         std::ofstream marker(path, std::ios::trunc);
         marker << detail::MakeId(kind, hash) << '\n';
+        if (!info.empty()) {
+            marker << info << '\n';
+        }
         marker.flush();
         active = static_cast<bool>(marker);
     }

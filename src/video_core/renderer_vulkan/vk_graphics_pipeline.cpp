@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <span>
@@ -346,7 +347,7 @@ GraphicsPipeline::GraphicsPipeline(
             }
             return;
         }
-        if (pipeline_statistics) {
+        if (pipeline_statistics && pipeline) {
             pipeline_statistics->Collect(device, *pipeline);
         }
         // Nothing reads the shader modules once the pipeline exists, and the driver keeps a copy
@@ -842,6 +843,26 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         vertex_input_ci.pNext = &input_divisor_ci;
     }
     const bool has_tess_stages = spv_modules[1] || spv_modules[2];
+    {
+        // Diagnosis switch: RADV on GFX12 crashed inside pipeline creation on several OoT
+        // pipelines that all had tessellation stages. EDEN_SKIP_TESSELLATION=1 leaves such
+        // pipelines unbuilt, so their draws are dropped (see Configure).
+        static const bool skip_tessellation = [] {
+            const char* value = std::getenv("EDEN_SKIP_TESSELLATION");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (skip_tessellation && has_tess_stages) {
+            static std::atomic<u32> skipped{0};
+            const u32 count = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (count <= 8 || count % 50 == 0) {
+                LOG_WARNING(Render_Vulkan,
+                            "Skipping tessellation pipeline {:016x} (EDEN_SKIP_TESSELLATION=1, "
+                            "tcs={} tes={}, {} skipped so far)",
+                            key.Hash(), spv_modules[1] ? 1 : 0, spv_modules[2] ? 1 : 0, count);
+            }
+            return;
+        }
+    }
     auto input_assembly_topology = MaxwellToVK::PrimitiveTopology(device, key.state.topology);
     if (input_assembly_topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST) {
         if (!has_tess_stages) {
@@ -1187,7 +1208,11 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         flags |= VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     }
 
-    const PipelineCrashGuard::Scope crash_guard{PipelineCrashGuard::Kind::Graphics, key.Hash()};
+    const PipelineCrashGuard::Scope crash_guard{
+        PipelineCrashGuard::Kind::Graphics, key.Hash(),
+        fmt::format("vs={} tcs={} tes={} gs={} fs={} topology={}", spv_modules[0] ? 1 : 0,
+                    spv_modules[1] ? 1 : 0, spv_modules[2] ? 1 : 0, spv_modules[3] ? 1 : 0,
+                    spv_modules[4] ? 1 : 0, static_cast<u32>(input_assembly_topology))};
     pipeline = device.GetLogical().CreateGraphicsPipeline({
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,

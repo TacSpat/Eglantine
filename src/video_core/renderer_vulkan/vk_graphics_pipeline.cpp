@@ -1210,9 +1210,13 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
 
     const PipelineCrashGuard::Scope crash_guard{
         PipelineCrashGuard::Kind::Graphics, key.Hash(),
-        fmt::format("vs={} tcs={} tes={} gs={} fs={} topology={}", spv_modules[0] ? 1 : 0,
-                    spv_modules[1] ? 1 : 0, spv_modules[2] ? 1 : 0, spv_modules[3] ? 1 : 0,
-                    spv_modules[4] ? 1 : 0, static_cast<u32>(input_assembly_topology))};
+        fmt::format("vs={} tcs={} tes={} gs={} fs={} topology={} shaders={:016x},{:016x},{:016x},"
+                    "{:016x},{:016x},{:016x}",
+                    spv_modules[0] ? 1 : 0, spv_modules[1] ? 1 : 0, spv_modules[2] ? 1 : 0,
+                    spv_modules[3] ? 1 : 0, spv_modules[4] ? 1 : 0,
+                    static_cast<u32>(input_assembly_topology), key.unique_hashes[0],
+                    key.unique_hashes[1], key.unique_hashes[2], key.unique_hashes[3],
+                    key.unique_hashes[4], key.unique_hashes[5])};
     pipeline = device.GetLogical().CreateGraphicsPipeline({
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,

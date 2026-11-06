@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -594,15 +595,49 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
         u64 serial;
         size_t result;
     };
-    thread_local std::array<Entry, 64> cache{};
+    // 64 entries missed constantly in OoT's open areas (MaxContinuousRangeUncached was ~14% of
+    // the GPU back thread); 1024 keeps a whole frame's binds.
+    static constexpr size_t CacheBits = 10;
+    thread_local std::array<Entry, size_t{1} << CacheBits> cache{};
+    // Per-thread statistics, logged every 10 s: tells capacity misses from page table changes.
+    struct Stats {
+        u64 calls{}, hits{}, serial_misses{}, other_misses{}, last_serial{}, serial_changes{};
+        std::chrono::steady_clock::time_point window{std::chrono::steady_clock::now()};
+    };
+    thread_local Stats stats;
     const u64 serial = map_serial.load(std::memory_order_acquire);
-    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> 58];
-    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size &&
-        entry.serial == serial) {
-        return entry.result;
+    ++stats.calls;
+    if (serial != stats.last_serial) {
+        ++stats.serial_changes;
+        stats.last_serial = serial;
+    }
+    const auto report = [&] {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - stats.window < std::chrono::seconds{10}) {
+            return;
+        }
+        LOG_INFO(HW_GPU,
+                 "MaxContinuousRange (10 s, this thread): {} calls, {} hits, {} misses after a page "
+                 "table change, {} other misses, {} page table changes seen",
+                 stats.calls, stats.hits, stats.serial_misses, stats.other_misses,
+                 stats.serial_changes);
+        stats = Stats{};
+        stats.last_serial = serial;
+    };
+    Entry& entry = cache[((gpu_addr ^ size) * 0x9E3779B97F4A7C15ULL) >> (64 - CacheBits)];
+    if (entry.owner == unique_identifier + 1 && entry.gpu_addr == gpu_addr && entry.size == size) {
+        if (entry.serial == serial) {
+            ++stats.hits;
+            report();
+            return entry.result;
+        }
+        ++stats.serial_misses;
+    } else {
+        ++stats.other_misses;
     }
     const size_t result = MaxContinuousRangeUncached(gpu_addr, size);
     entry = {unique_identifier + 1, gpu_addr, size, serial, result};
+    report();
     return result;
 }
 

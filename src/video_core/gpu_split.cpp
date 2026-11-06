@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <atomic>
 #include <algorithm>
 #include <cstdlib>
 #include <thread>
@@ -129,6 +130,16 @@ void GpuSplit::MaybeStart(Core::System& system_) {
         Stop();
         LOG_INFO(HW_GPU, "GPU thread split: stopped, the accuracy settings need the caches on the front");
         return;
+    }
+    if (!allowed && !active) {
+        // High GPU accuracy (or safe DMA) keeps the split off, which roughly halves GPU-thread
+        // throughput on Switch 2 titles. Say so once, since nothing else shows it.
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            LOG_WARNING(HW_GPU,
+                        "GPU thread split is off because GPU accuracy is Accurate (High) or DMA "
+                        "accuracy is Safe; set GPU accuracy to Fast for ~1.5x GPU-thread throughput");
+        }
     }
     if (active || !allowed) {
         return;

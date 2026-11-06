@@ -2951,6 +2951,30 @@ SamplerId TextureCache<P>::FindSampler(const TSCEntry& config, bool compute) {
 }
 
 template <class P>
+bool TextureCache<P>::IsPlausibleRenderTarget(const ImageInfo& info, GPUVAddr gpu_addr) {
+    // Render target registers read as garbage (e.g. after an unimplemented format or a
+    // desynced command stream) can ask for images no GPU can allocate, which makes the
+    // driver return VK_ERROR_OUT_OF_DEVICE_MEMORY and terminates the emulator. Skip the
+    // target instead, like an unbound one.
+    constexpr u32 max_extent = 32768;
+    constexpr u32 max_layers = 2048;
+    const bool plausible = info.size.width != 0 && info.size.height != 0 &&
+                           info.size.width <= max_extent && info.size.height <= max_extent &&
+                           info.size.depth <= max_layers &&
+                           static_cast<u32>(info.resources.layers) <= max_layers;
+    if (!plausible) {
+        static std::atomic<u32> reports{0};
+        if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(HW_GPU,
+                        "Skipping implausible render target at {:#x}: {}x{}x{}, {} layers, format {}",
+                        gpu_addr, info.size.width, info.size.height, info.size.depth,
+                        info.resources.layers, static_cast<u32>(info.format));
+        }
+    }
+    return plausible;
+}
+
+template <class P>
 ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
     const auto& regs = maxwell3d->regs;
     if (index >= regs.rt_control.count) {
@@ -2965,6 +2989,9 @@ ImageViewId TextureCache<P>::FindColorBuffer(size_t index) {
         return ImageViewId{};
     }
     const ImageInfo info(regs.rt[index], regs.anti_alias_samples_mode);
+    if (!IsPlausibleRenderTarget(info, gpu_addr)) {
+        return ImageViewId{};
+    }
     return FindRenderTargetView(info, gpu_addr);
 }
 
@@ -2979,6 +3006,9 @@ ImageViewId TextureCache<P>::FindDepthBuffer() {
         return ImageViewId{};
     }
     const ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
+    if (!IsPlausibleRenderTarget(info, gpu_addr)) {
+        return ImageViewId{};
+    }
     return FindRenderTargetView(info, gpu_addr);
 }
 

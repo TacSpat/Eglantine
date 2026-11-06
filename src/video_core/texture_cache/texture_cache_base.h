@@ -428,6 +428,9 @@ private:
     /// Find or create a sampler from a guest descriptor sampler
     [[nodiscard]] SamplerId FindSampler(const TSCEntry& config, bool compute);
 
+    /// Rejects render targets whose registers describe an image no GPU could allocate.
+    [[nodiscard]] bool IsPlausibleRenderTarget(const ImageInfo& info, GPUVAddr gpu_addr);
+
     /// Find or create an image view for the given color buffer index
     [[nodiscard]] ImageViewId FindColorBuffer(size_t index);
 

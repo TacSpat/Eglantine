@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -602,6 +603,7 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
     // Per-thread statistics, logged every 10 s: tells capacity misses from page table changes.
     struct Stats {
         u64 calls{}, hits{}, serial_misses{}, other_misses{}, last_serial{}, serial_changes{};
+        u64 run_hits{}, run_walks{};
         std::chrono::steady_clock::time_point window{std::chrono::steady_clock::now()};
     };
     thread_local Stats stats;
@@ -618,9 +620,10 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
         }
         LOG_INFO(HW_GPU,
                  "MaxContinuousRange (10 s, this thread): {} calls, {} hits, {} misses after a page "
-                 "table change, {} other misses, {} page table changes seen",
-                 stats.calls, stats.hits, stats.serial_misses, stats.other_misses,
-                 stats.serial_changes);
+                 "table change, {} other misses ({} answered from page runs, {} page walks), {} "
+                 "page table changes seen",
+                 stats.calls, stats.hits, stats.serial_misses, stats.other_misses, stats.run_hits,
+                 stats.run_walks, stats.serial_changes);
         stats = Stats{};
         stats.last_serial = serial;
     };
@@ -635,7 +638,45 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
     } else {
         ++stats.other_misses;
     }
-    const size_t result = MaxContinuousRangeUncached(gpu_addr, size);
+    // Storage buffer binds of native programs ask from a new address on almost every draw (per
+    // object data pointers), so the exact-key cache above misses and each miss walked up to
+    // 8 MiB of pages. How far device memory is contiguous from any address in a page is the
+    // same for the whole page: walk once from the page start (up to RunWalk) and keep where
+    // the run ends, per page, until the page table changes.
+    static constexpr size_t RunWalk = size_t{16} << 20; // 16 MiB
+    static constexpr size_t RunPageBits = 12;
+    static constexpr size_t RunCacheBits = 12;
+    struct RunEntry {
+        size_t owner;
+        GPUVAddr page;
+        u64 serial;
+        GPUVAddr run_end; ///< First address past the contiguous run (page + walked length)
+        bool capped;      ///< The walk stopped at RunWalk, not at a discontinuity
+    };
+    thread_local std::array<RunEntry, size_t{1} << RunCacheBits> runs{};
+    size_t result;
+    const GPUVAddr page = gpu_addr & ~((GPUVAddr{1} << RunPageBits) - 1);
+    static const bool page_cache = [] {
+        const char* value = std::getenv("EDEN_MCR_PAGE_CACHE");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (page_cache && size <= RunWalk - (size_t{1} << RunPageBits)) {
+        RunEntry& run = runs[((page >> RunPageBits) * 0x9E3779B97F4A7C15ULL) >> (64 - RunCacheBits)];
+        if (run.owner != unique_identifier + 1 || run.page != page || run.serial != serial) {
+            const size_t walked = MaxContinuousRangeUncached(page, RunWalk);
+            run = {unique_identifier + 1, page, serial, page + walked, walked >= RunWalk};
+            ++stats.run_walks;
+        } else {
+            ++stats.run_hits;
+        }
+        if (run.capped || run.run_end >= gpu_addr + size) {
+            result = size;
+        } else {
+            result = run.run_end > gpu_addr ? static_cast<size_t>(run.run_end - gpu_addr) : 0;
+        }
+    } else {
+        result = MaxContinuousRangeUncached(gpu_addr, size);
+    }
     entry = {unique_identifier + 1, gpu_addr, size, serial, result};
     report();
     return result;

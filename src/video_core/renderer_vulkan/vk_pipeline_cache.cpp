@@ -30,6 +30,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/renderer_vulkan/vk_pipeline_crash_guard.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
@@ -1105,6 +1106,9 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     bool build_in_parallel) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
+    if (PipelineCrashGuard::IsBlocked(PipelineCrashGuard::Kind::Graphics, hash)) {
+        return nullptr;
+    }
     size_t env_index{0};
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
@@ -1427,6 +1431,9 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
             GPU::Logging::DumpSpirvShader(key.unique_hash,
                                           std::span<const u32>(code.data(), code.size()));
         }
+    }
+    if (PipelineCrashGuard::IsBlocked(PipelineCrashGuard::Kind::Compute, key.unique_hash)) {
+        return nullptr;
     }
 
     if (device.HasDebuggingToolAttached()) {

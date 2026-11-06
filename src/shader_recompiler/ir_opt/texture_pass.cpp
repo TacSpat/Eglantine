@@ -1330,7 +1330,10 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                 });
             } else {
                 count = std::min(count, sampled_dynamic_cap);
-                const bool is_integer{is_texture_pixel_format_integer(cbuf)};
+                // Depth comparisons only exist for float images. A depth texture whose descriptor
+                // read as an integer format (unknown formats do) was declared with u32 texels,
+                // which Mesa's SPIR-V parser rejects; RADV then crashed on the missing shader.
+                const bool is_integer{flags.is_depth == 0 && is_texture_pixel_format_integer(cbuf)};
                 index = descriptors.Add(TextureDescriptor{
                     .type = flags.type,
                     .is_depth = flags.is_depth != 0,
